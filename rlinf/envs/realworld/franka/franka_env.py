@@ -46,6 +46,13 @@ class FrankaRobotConfig:
     robot_ip: Optional[str] = None
     camera_serials: Optional[list[str]] = None
     camera_type: Optional[str] = None
+    control_backend: str = "ros"
+    control_client_server_ip: str = "127.0.0.1"
+    control_client_node_name: Optional[str] = None
+    control_client_group_name: Optional[str] = None
+    control_client_group_port: Optional[int] = None
+    control_client_arm_name: Optional[str] = None
+    control_client_gripper_name: Optional[str] = None
     gripper_type: Optional[str] = None
     gripper_connection: Optional[str] = None
     enable_camera_player: bool = True
@@ -182,6 +189,39 @@ class FrankaEnv(gym.Env):
             self.config.gripper_connection = getattr(
                 self.hardware_info.config, "gripper_connection", None
             )
+        if (
+            self.config.control_backend == "ros"
+            and getattr(self.hardware_info.config, "control_backend", "ros") != "ros"
+        ):
+            self.config.control_backend = getattr(
+                self.hardware_info.config, "control_backend", "ros"
+            )
+        if self.config.control_client_server_ip == "127.0.0.1":
+            self.config.control_client_server_ip = getattr(
+                self.hardware_info.config,
+                "control_client_server_ip",
+                self.config.control_client_server_ip,
+            )
+        if self.config.control_client_node_name is None:
+            self.config.control_client_node_name = getattr(
+                self.hardware_info.config, "control_client_node_name", None
+            )
+        if self.config.control_client_group_name is None:
+            self.config.control_client_group_name = getattr(
+                self.hardware_info.config, "control_client_group_name", None
+            )
+        if self.config.control_client_group_port is None:
+            self.config.control_client_group_port = getattr(
+                self.hardware_info.config, "control_client_group_port", None
+            )
+        if self.config.control_client_arm_name is None:
+            self.config.control_client_arm_name = getattr(
+                self.hardware_info.config, "control_client_arm_name", None
+            )
+        if self.config.control_client_gripper_name is None:
+            self.config.control_client_gripper_name = getattr(
+                self.hardware_info.config, "control_client_gripper_name", None
+            )
 
         # Place the controller on controller_node_rank if the arm lives on a
         # different machine (e.g. cameras on GPU server, arm on NUC).
@@ -196,6 +236,13 @@ class FrankaEnv(gym.Env):
             env_idx=self.env_idx,
             node_rank=controller_node_rank,
             worker_rank=self.env_worker_rank,
+            control_backend=self.config.control_backend,
+            control_client_server_ip=self.config.control_client_server_ip,
+            control_client_node_name=self.config.control_client_node_name,
+            control_client_group_name=self.config.control_client_group_name,
+            control_client_group_port=self.config.control_client_group_port,
+            control_client_arm_name=self.config.control_client_arm_name,
+            control_client_gripper_name=self.config.control_client_gripper_name,
             gripper_type=self.config.gripper_type or "franka",
             gripper_connection=self.config.gripper_connection,
         )
@@ -434,6 +481,10 @@ class FrankaEnv(gym.Env):
                 name=f"wrist_{i + 1}",
                 serial_number=n,
                 camera_type=camera_type,
+                control_client_server_ip=self.config.control_client_server_ip,
+                control_client_node_name=self.config.control_client_node_name,
+                control_client_group_name=self.config.control_client_group_name,
+                control_client_group_port=self.config.control_client_group_port,
             )
             for i, n in enumerate(self.config.camera_serials)
         ]

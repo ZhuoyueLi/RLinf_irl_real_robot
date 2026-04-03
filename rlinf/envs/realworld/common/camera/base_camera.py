@@ -32,6 +32,10 @@ class CameraInfo:
     resolution: tuple[int, int] = (640, 480)
     fps: int = 15
     enable_depth: bool = False
+    control_client_server_ip: str = "127.0.0.1"
+    control_client_node_name: Optional[str] = None
+    control_client_group_name: Optional[str] = None
+    control_client_group_port: Optional[int] = None
 
 
 class BaseCamera(ABC):

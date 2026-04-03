@@ -30,8 +30,13 @@ def create_camera(camera_info: CameraInfo) -> BaseCamera:
 
     * ``"realsense"`` / ``"rs"`` — Intel RealSense (requires ``pyrealsense2``)
     * ``"zed"`` — Stereolabs ZED (requires the ZED SDK / ``pyzed``)
+    * ``"control_client"`` — remote camera served via franka_control_client
     """
     camera_type = camera_info.camera_type.lower()
+    if camera_type in ("control_client", "pyzlc"):
+        from .control_client_camera import ControlClientCamera
+
+        return ControlClientCamera(camera_info)
     if camera_type == "zed":
         from .zed_camera import ZEDCamera
 

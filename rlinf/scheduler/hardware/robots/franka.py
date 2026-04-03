@@ -114,19 +114,20 @@ class FrankaRobot(Hardware):
                         f"An unexpected error occurred while pinging Franka robot at IP {config.robot_ip} from node rank {node_rank}. Ignoring the ping test. Error: {e}"
                     )
 
-                # Validate camera SDK and serials
-                cls._validate_camera_sdk(camera_type, node_rank)
-                if not cameras:
-                    raise ValueError(
-                        f"No {camera_type} cameras are connected to node rank {node_rank} "
-                        f"while Franka robot requires at least one camera."
-                    )
-                for serial in config.camera_serials:
-                    if serial not in cameras:
+                if camera_type != "control_client":
+                    # Validate camera SDK and serials
+                    cls._validate_camera_sdk(camera_type, node_rank)
+                    if not cameras:
                         raise ValueError(
-                            f"Camera with serial {serial} is not connected to node rank {node_rank}. "
-                            f"Available {camera_type} cameras: {cameras}."
+                            f"No {camera_type} cameras are connected to node rank {node_rank} "
+                            f"while Franka robot requires at least one camera."
                         )
+                    for serial in config.camera_serials:
+                        if serial not in cameras:
+                            raise ValueError(
+                                f"Camera with serial {serial} is not connected to node rank {node_rank}. "
+                                f"Available {camera_type} cameras: {cameras}."
+                            )
 
             return HardwareResource(type=cls.HW_TYPE, infos=franka_infos)
         return None
@@ -139,6 +140,8 @@ class FrankaRobot(Hardware):
             camera_type: ``"realsense"`` or ``"zed"``.
         """
         cameras: set[str] = set()
+        if camera_type.lower() == "control_client":
+            return cameras
         if camera_type.lower() == "zed":
             try:
                 import pyzed.sl as sl
@@ -187,7 +190,28 @@ class FrankaConfig(HardwareConfig):
     """List of camera serial numbers associated with the robot."""
 
     camera_type: str = "realsense"
-    """Camera backend: ``"realsense"`` or ``"zed"``."""
+    """Camera backend: ``"realsense"``, ``"zed"``, or ``"control_client"``."""
+
+    control_backend: str = "ros"
+    """Robot control backend: ``"ros"`` or ``"control_client"``."""
+
+    control_client_server_ip: str = "127.0.0.1"
+    """Server IP used by pyzlc / franka_control_client."""
+
+    control_client_node_name: Optional[str] = None
+    """Optional pyzlc node name used by the controller process."""
+
+    control_client_group_name: Optional[str] = None
+    """Optional pyzlc group name used by the controller process."""
+
+    control_client_group_port: Optional[int] = None
+    """Optional pyzlc group port used by the controller process."""
+
+    control_client_arm_name: Optional[str] = None
+    """Remote arm device name exposed by franka_control_client."""
+
+    control_client_gripper_name: Optional[str] = None
+    """Remote gripper device name exposed by franka_control_client."""
 
     gripper_type: str = "franka"
     """Gripper backend: ``"franka"`` (ROS-based) or ``"robotiq"`` (Modbus RTU)."""

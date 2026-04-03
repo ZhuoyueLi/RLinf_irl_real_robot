@@ -21,6 +21,7 @@ import psutil
 from scipy.spatial.transform import Rotation as R
 
 from rlinf.envs.realworld.common.gripper import create_gripper
+from rlinf.envs.realworld.backends import ControlClientFrankaBackend
 from rlinf.scheduler import Cluster, NodePlacementStrategy, Worker
 from rlinf.utils.logging import get_logger
 
@@ -45,6 +46,13 @@ class FrankaController(Worker):
         node_rank: int = 0,
         worker_rank: int = 0,
         ros_pkg: str = "serl_franka_controllers",
+        control_backend: str = "ros",
+        control_client_server_ip: str = "127.0.0.1",
+        control_client_node_name: Optional[str] = None,
+        control_client_group_name: Optional[str] = None,
+        control_client_group_port: Optional[int] = None,
+        control_client_arm_name: Optional[str] = None,
+        control_client_gripper_name: Optional[str] = None,
         gripper_type: str = "franka",
         gripper_connection: Optional[str] = None,
     ):
@@ -66,7 +74,17 @@ class FrankaController(Worker):
         cluster = Cluster()
         placement = NodePlacementStrategy(node_ranks=[node_rank])
         return FrankaController.create_group(
-            robot_ip, ros_pkg, gripper_type, gripper_connection
+            robot_ip,
+            ros_pkg,
+            control_backend,
+            control_client_server_ip,
+            control_client_node_name,
+            control_client_group_name,
+            control_client_group_port,
+            control_client_arm_name,
+            control_client_gripper_name,
+            gripper_type,
+            gripper_connection,
         ).launch(
             cluster=cluster,
             placement_strategy=placement,
@@ -77,6 +95,13 @@ class FrankaController(Worker):
         self,
         robot_ip: str,
         ros_pkg: str = "serl_franka_controllers",
+        control_backend: str = "ros",
+        control_client_server_ip: str = "127.0.0.1",
+        control_client_node_name: Optional[str] = None,
+        control_client_group_name: Optional[str] = None,
+        control_client_group_port: Optional[int] = None,
+        control_client_arm_name: Optional[str] = None,
+        control_client_gripper_name: Optional[str] = None,
         gripper_type: str = "franka",
         gripper_connection: Optional[str] = None,
     ):
@@ -84,7 +109,27 @@ class FrankaController(Worker):
         self._logger = get_logger()
         self._robot_ip = robot_ip
         self._ros_pkg = ros_pkg
+        self._control_backend = control_backend
         self._gripper_type = gripper_type
+        self._backend = None
+        self._gripper = None
+        self._ros = None
+        self._impedance: psutil.Process = None
+        self._joint: psutil.Process = None
+        self._state = FrankaRobotState()
+
+        if self._control_backend == "control_client":
+            arm_name = control_client_arm_name or "FrankaPanda"
+            self._backend = ControlClientFrankaBackend(
+                arm_name=arm_name,
+                server_ip=control_client_server_ip,
+                node_name=control_client_node_name or "rlinf-franka-controller",
+                group_name=control_client_group_name,
+                group_port=control_client_group_port,
+                gripper_type=gripper_type,
+                gripper_name=control_client_gripper_name,
+            )
+            return
 
         # Lazy-import ROS packages so that the module can be imported on
         # machines without ROS (e.g. a GPU server that only runs the env
@@ -102,9 +147,6 @@ class FrankaController(Worker):
         self._FrankaState = FrankaState
         self._ZeroJacobian = ZeroJacobian
 
-        # Franka state
-        self._state = FrankaRobotState()
-
         # ROS controller (arm channels only)
         from rlinf.envs.realworld.common.ros import ROSController
 
@@ -117,10 +159,6 @@ class FrankaController(Worker):
             ros=self._ros,
             port=gripper_connection,
         )
-
-        # roslaunch processes
-        self._impedance: psutil.Process = None
-        self._joint: psutil.Process = None
 
         # Start impedance control
         self.start_impedance()
@@ -188,11 +226,16 @@ class FrankaController(Worker):
     # ── Public API ───────────────────────────────────────────────────
 
     def reconfigure_compliance_params(self, params: dict[str, float]):
+        if self._backend is not None:
+            self._backend.reconfigure_compliance_params(params)
+            return
         self._reconf_client.update_configuration(params)
         self.log_debug(f"Reconfigure compliance parameters: {params}")
 
     def is_robot_up(self) -> bool:
         """Check if the arm state channel and the gripper are both ready."""
+        if self._backend is not None:
+            return self._backend.is_ready()
         arm_ok = self._ros.get_input_channel_status(self._arm_state_channel)
         gripper_ok = self._gripper.is_ready()
         return arm_ok and gripper_ok
@@ -203,6 +246,9 @@ class FrankaController(Worker):
         Gripper position and open/closed flag are synced from the gripper
         object each time this method is called.
         """
+        if self._backend is not None:
+            self._state = self._backend.get_state()
+            return self._state
         self._state.gripper_position = self._gripper.position
         self._state.gripper_open = self._gripper.is_open
         return self._state
@@ -216,6 +262,8 @@ class FrankaController(Worker):
         is set to ``false`` so that the Franka controller does not attempt
         to manage the built-in gripper.
         """
+        if self._backend is not None:
+            return
         load_gripper = "true" if self._gripper_type == "franka" else "false"
         self._impedance = psutil.Popen(
             [
@@ -233,6 +281,8 @@ class FrankaController(Worker):
         self.log_debug(f"Start Impedance controller: {self._impedance.status()}")
 
     def stop_impedance(self):
+        if self._backend is not None:
+            return
         if self._impedance:
             self._impedance.terminate()
             self._impedance = None
@@ -240,6 +290,9 @@ class FrankaController(Worker):
         self.log_debug("Stop Impedance controller")
 
     def clear_errors(self):
+        if self._backend is not None:
+            self._backend.clear_errors()
+            return
         self._ros.put_channel(self._arm_reset_channel, self._ErrorRecoveryActionGoal())
 
     def reset_joint(self, reset_pos: list[float]):
@@ -248,6 +301,9 @@ class FrankaController(Worker):
         Args:
             reset_pos: Desired joint positions (7-DOF).
         """
+        if self._backend is not None:
+            self._backend.reset_joint(reset_pos)
+            return
         self.stop_impedance()
         self.clear_errors()
         self._wait_robot()
@@ -289,6 +345,9 @@ class FrankaController(Worker):
         Args:
             position: 7-D array ``[x, y, z, qx, qy, qz, qw]``.
         """
+        if self._backend is not None:
+            self._backend.move_arm(position)
+            return
         assert len(position) == 7, (
             f"Invalid position, expected 7 dimensions but got {len(position)}"
         )
@@ -308,14 +367,26 @@ class FrankaController(Worker):
     # ── Gripper (delegates to self._gripper) ─────────────────────────
 
     def open_gripper(self):
+        if self._backend is not None:
+            self._backend.open_gripper()
+            self.log_debug("Open gripper")
+            return
         self._gripper.open()
         self.log_debug("Open gripper")
 
     def close_gripper(self):
+        if self._backend is not None:
+            self._backend.close_gripper()
+            self.log_debug("Close gripper")
+            return
         self._gripper.close()
         self.log_debug("Close gripper")
 
     def move_gripper(self, position: int, speed: float = 0.3):
+        if self._backend is not None:
+            self._backend.move_gripper(position, speed)
+            self.log_debug(f"Move gripper to position: {position}")
+            return
         assert 0 <= position <= 255, (
             f"Invalid gripper position {position}, must be between 0 and 255"
         )
