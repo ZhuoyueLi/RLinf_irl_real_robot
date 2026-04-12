@@ -91,6 +91,9 @@ RLinf provides ``toolkits/replay_buffer/calculate_norm_stats.py`` to calculate n
    python toolkits/replay_buffer/calculate_norm_stats.py \
        --config-name pi0_franka_dagger \
        --repo-id franka_dagger
+    python toolkits/replay_buffer/calculate_norm_stats.py \
+       --config-name franka_joint_dataconfig \
+       --repo-id new_scarf_25hz_right_wrist_without_ft
 
 Notes:
 
@@ -179,7 +182,7 @@ Install dependencies directly in your environment by running the following comma
 
     # For mainland China users, you can add the `--use-mirror` flag to the install.sh command for better download speed.
 
-    bash requirements/install.sh embodied --model openpi --env maniskill_libero
+    bash requirements/install.sh embodied --model openpi --env robotwin
     source .venv/bin/activate
 
 Launch scripts
@@ -191,5 +194,6 @@ First start the Ray cluster, then run the helper script:
 
    # return to repo root
    bash examples/sft/run_vla_sft.sh libero_sft_openpi
+   bash examples/sft/run_vla_sft.sh franka_joint_sft_openpi_pi05
 
 The same script works for generic text SFT; just swap the config file.

@@ -121,3 +121,40 @@ python toolkits/eval_scripts_openpi/calvin_eval.py \
     --video_temp_subsample 10
 ```
 
+### Open-Loop Checkpoint Eval (`open_loop_eval.py`)
+
+This script evaluates a checkpoint directly on a dataset without stepping an
+environment. It is useful for quick checkpoint screening, regression checks,
+and action-error analysis on datasets such as Franka Dagger or Franka Joint.
+
+**Example: Franka joint**
+```bash
+python toolkits/eval_scripts_openpi/open_loop_eval.py \
+    --exp_name franka_joint_open_loop \
+    --config_name pi05_franka_joint \
+    --pretrained_path your_model_path/ \
+    --repo_id your_lerobot_repo_id \
+    --max_samples 512 \
+    --num_steps 10
+```
+
+**Example: Franka dagger**
+```bash
+python toolkits/eval_scripts_openpi/open_loop_eval.py \
+    --exp_name franka_dagger_open_loop \
+    --config_name pi0_franka_dagger \
+    --pretrained_path your_model_path/ \
+    --repo_id your_lerobot_repo_id \
+    --max_samples 512 \
+    --num_steps 10
+```
+
+The script writes `open_loop_metrics.json` under
+`<log_dir>/<exp_name>/` and prints metrics such as:
+- `mean_action_l1`
+- `mean_action_rmse`
+- `mean_step_l2`
+- `first_action_l1`
+- `first_action_rmse`
+- `per_dim_l1`
+- `per_dim_rmse`

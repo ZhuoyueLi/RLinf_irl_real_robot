@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+from pathlib import Path
 
 import numpy as np
 import openpi.models.model as _model
@@ -33,6 +34,17 @@ class RemoveStrings(transforms.DataTransformFn):
             for k, v in x.items()
             if not np.issubdtype(np.asarray(v).dtype, np.str_)
         }
+
+
+def _require_pyarrow():
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise SystemExit(
+            "Missing dependency: pyarrow. Install it in the current environment "
+            "to use the raw parquet fallback path."
+        ) from exc
+    return pq
 
 
 def create_torch_dataloader(
@@ -104,6 +116,35 @@ def create_rlds_dataloader(
     return data_loader, num_batches
 
 
+def compute_stats_from_raw_parquet(dataset_root: Path) -> dict[str, dict]:
+    pq = _require_pyarrow()
+    parquet_files = sorted((dataset_root / "data").glob("chunk-*/**/*.parquet"))
+    if not parquet_files:
+        raise FileNotFoundError(f"No parquet files found under {dataset_root / 'data'}")
+
+    stats = {"state": normalize.RunningStats(), "actions": normalize.RunningStats()}
+    state_candidates = ["observation.state", "state"]
+    action_candidates = ["actions", "action"]
+
+    for parquet_file in tqdm.tqdm(parquet_files, desc="Reading raw parquet"):
+        schema_names = set(pq.read_schema(parquet_file).names)
+        state_key = next((key for key in state_candidates if key in schema_names), None)
+        action_key = next((key for key in action_candidates if key in schema_names), None)
+
+        if state_key is None or action_key is None:
+            raise KeyError(
+                f"Could not find state/action columns in {parquet_file}. "
+                f"Available columns: {sorted(schema_names)}"
+            )
+
+        table = pq.read_table(parquet_file, columns=[state_key, action_key])
+        data = table.to_pydict()
+        stats["state"].update(np.asarray(data[state_key]))
+        stats["actions"].update(np.asarray(data[action_key]))
+
+    return {key: value.get_statistics() for key, value in stats.items()}
+
+
 def main(
     config_name: str,
     repo_id: str,
@@ -124,6 +165,14 @@ def main(
         data_loader, num_batches = create_rlds_dataloader(
             data_config, config.model.action_horizon, config.batch_size
         )
+        keys = ["state", "actions"]
+        stats = {key: normalize.RunningStats() for key in keys}
+
+        for batch in tqdm.tqdm(data_loader, total=num_batches, desc="Computing stats"):
+            for key in keys:
+                stats[key].update(np.asarray(batch[key]))
+
+        norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
     else:
         data_loader, num_batches = create_torch_dataloader(
             data_config,
@@ -132,15 +181,29 @@ def main(
             config.model,
             config.num_workers,
         )
+        try:
+            keys = ["state", "actions"]
+            stats = {key: normalize.RunningStats() for key in keys}
 
-    keys = ["state", "actions"]
-    stats = {key: normalize.RunningStats() for key in keys}
+            for batch in tqdm.tqdm(data_loader, total=num_batches, desc="Computing stats"):
+                for key in keys:
+                    stats[key].update(np.asarray(batch[key]))
 
-    for batch in tqdm.tqdm(data_loader, total=num_batches, desc="Computing stats"):
-        for key in keys:
-            stats[key].update(np.asarray(batch[key]))
-
-    norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
+            norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
+        except RuntimeError as exc:
+            # For some RLinf environments, dataset iteration fails when video
+            # decoding goes through torchcodec without a working ffmpeg runtime.
+            # Norm stats only need state/actions, so fall back to reading the
+            # raw parquet columns directly.
+            message = str(exc)
+            if "torchcodec" not in message and "ffmpeg" not in message:
+                raise
+            dataset_root = Path(os.environ["HF_LEROBOT_HOME"]) / repo_id
+            print(
+                "Video decoding failed during dataloader iteration; "
+                f"falling back to raw parquet stats from {dataset_root}."
+            )
+            norm_stats = compute_stats_from_raw_parquet(dataset_root)
 
     output_path = config.assets_dirs / data_config.repo_id
     print(f"Writing stats to: {output_path}")

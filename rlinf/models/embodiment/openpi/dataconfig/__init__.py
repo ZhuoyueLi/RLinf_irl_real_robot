@@ -38,6 +38,9 @@ from rlinf.models.embodiment.openpi.dataconfig.franka_co_training_dataconfig imp
 from rlinf.models.embodiment.openpi.dataconfig.franka_dagger_dataconfig import (
     LeRobotFrankaDaggerDataConfig,
 )
+from rlinf.models.embodiment.openpi.dataconfig.franka_joint_dataconfig import (
+    LeRobotFrankaJointDataConfig,
+)
 from rlinf.models.embodiment.openpi.dataconfig.franka_dataconfig import (
     CustomDataConfig,
 )
@@ -156,6 +159,32 @@ _CONFIGS = [
                 assets_dir="checkpoints/torch/pi05_franka_pretrained/assets"
             ),
             output_action_dim=6,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "checkpoints/jax/pi05_base"
+        ),
+        pytorch_weight_path="checkpoints/torch/pi05_base",
+        seed=0,
+        batch_size=16,
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_workers=8,
+        num_train_steps=5_000,
+        log_interval=5,
+        save_interval=250,
+    ),
+    TrainConfig(
+        name="pi05_franka_joint",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=8, discrete_state_input=False
+        ),
+        data=LeRobotFrankaJointDataConfig(
+            repo_id="franka_joint",
+            base_config=DataConfig(prompt_from_task=False),
+            assets=AssetsConfig(
+                assets_dir="checkpoints/torch/pi05_franka_joint/assets"
+            ),
+            default_prompt="perform the task",
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "checkpoints/jax/pi05_base"
@@ -396,6 +425,32 @@ _CONFIGS = [
             "checkpoints/jax/pi05_base/params"
         ),
         pytorch_weight_path="checkpoints/torch/pi05_base",
+    ),
+     TrainConfig(
+        name="pi05_franka_irl_droid",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=8, discrete_state_input=False
+        ),  # discrete_state_input=False: stateless policy, True: with state policy
+        data=LeRobotFrankaEEDataConfig(
+            repo_id="physical-intelligence/real_rl",  # Not important
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(
+                assets_dir="checkpoints/torch/pi05_franka_pretrained/assets"
+            ),
+            output_action_dim=6,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "checkpoints/jax/pi05_base"
+        ),
+        pytorch_weight_path="checkpoints/torch/pi05_base",
+        seed=0,
+        batch_size=16,
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_workers=8,
+        num_train_steps=5_000,
+        log_interval=5,
+        save_interval=250,
     ),
 ]
 
