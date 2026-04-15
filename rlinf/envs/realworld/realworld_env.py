@@ -244,14 +244,34 @@ class RealWorldEnv(gym.Env):
     def _wrap_obs(self, raw_obs):
         """
         raw_obs: Dict of list
+        
+        Handles two observation formats:
+        - control_client (8D): joint_positions[7] + gripper_position[1]
+        - ROS (20D): tcp_pose[7] + tcp_vel[6] + gripper_position[1] + tcp_force[3] + tcp_torque[3]
         """
         obs = {}
 
         # Process states
         full_states = []
         raw_states = OrderedDict(sorted(raw_obs["state"].items()))
-        for value in raw_states.values():
-            full_states.append(value)
+        
+        # Detect state format and concatenate in correct order
+        state_keys = list(raw_states.keys())
+        
+        # Check if this is joint-based (control_client) or TCP-based (ROS) format
+        if "joint_positions" in state_keys:
+            # control_client format: concatenate joint-based state in order
+            # Order: joint_positions, gripper_position (8D total)
+            order = ["joint_positions", "gripper_position"]
+            for key in order:
+                if key in raw_states:
+                    full_states.append(raw_states[key])
+        else:
+            # ROS format: concatenate TCP-based state in alphabetical order
+            # This maintains backward compatibility with existing code
+            for value in raw_states.values():
+                full_states.append(value)
+        
         full_states = np.concatenate(full_states, axis=-1)
         obs["states"] = full_states
 

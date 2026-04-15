@@ -51,7 +51,7 @@ class OpenPi0Config(Pi0Config):
     )  # [min_std, max_std]
     # hyper-parameters
     action_chunk: int = 5  # action chunk
-    action_env_dim: int = 7  # for environment action dim
+    action_env_dim: int = 8  # for environment action dim (7 joints + 1 gripper for joint control)
     num_steps: int = 10  # denoise steps
     # training config
     train_expert_only: bool = False

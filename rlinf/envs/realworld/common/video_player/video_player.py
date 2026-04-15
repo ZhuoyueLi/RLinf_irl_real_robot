@@ -47,9 +47,10 @@ class VideoPlayer:
             if img_array is None:  # None is our signal to exit
                 break
 
-            frame = np.concatenate(
-                [v for k, v in img_array.items() if "full" not in k], axis=0
-            )
+            visible_frames = [v for k, v in img_array.items() if "full" not in k]
+            if not visible_frames:
+                continue
+            frame = np.concatenate(visible_frames, axis=0)
 
             cv2.imshow("Cameras", frame)
             cv2.waitKey(1)

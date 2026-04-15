@@ -82,3 +82,18 @@ override_cfg:
     rotational_clip_neg_y: 0.05
     rotational_clip_neg_z: 0.05
     rotational_Ki: 0.1
+  
+  # Joint Control Configuration (NEW - for franka_control_client)
+  # Set action_type to "joint" to use joint-based actions (7 joints + 1 gripper)
+  # Set action_type to "cartesian" for legacy Cartesian-based actions (6D + 1 gripper)
+  action_type: "cartesian"  # Change to "joint" for joint control
+  max_joint_update: 0.2     # Maximum rad per control step
+  joint_velocity_limit_scale: 0.5  # Of hardware limits
+  control_frequency: 100.0  # Hz for control_client
+  
+  # Control Client / Camera Configuration (Alternative to ROS)
+  # Set use_control_client: true to use franka_control_client instead of ROS
+  use_control_client: false  # Change to true to use control_client
+  control_client_ip: "192.168.x.x"  # Robot IP address
+  camera_serials: ["zed_left", "zed_right"]  # ZED camera serial numbers
+  gripper_type: "robotiq"  # "robotiq" or "franka"

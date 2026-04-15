@@ -48,6 +48,16 @@ class FrankaRobotConfig:
     camera_type: Optional[str] = None
     gripper_type: Optional[str] = None
     gripper_connection: Optional[str] = None
+    
+    # Control Client Configuration (Alternative to ROS)
+    use_control_client: bool = False
+    control_client_ip: Optional[str] = None
+    control_client_group_name: str = "DroidGroup"
+    control_client_group_port: int = 7730
+    control_client_config: Optional[dict] = None  # Robot connection config
+    camera_device_config: Optional[dict] = None   # ZED camera config
+    gripper_device_config: Optional[dict] = None  # Robotiq gripper config
+    
     enable_camera_player: bool = True
 
     is_dummy: bool = False
@@ -96,6 +106,12 @@ class FrankaRobotConfig:
     success_hold_steps: int = (
         1  # Default to 1 to maintain backward compatibility (immediate success)
     )
+    
+    # Joint Control Configuration (for control_client)
+    action_type: str = "cartesian"  # "cartesian" or "joint"
+    max_joint_update: float = 0.2     # Maximum rad per control step
+    joint_velocity_limit_scale: float = 0.5  # Of hardware limits
+    control_frequency: float = 100.0  # Hz for control_client
 
     def __post_init__(self):
         """Convert list fields from YAML/Hydra to numpy arrays."""
@@ -111,6 +127,14 @@ class FrankaEnv(gym.Env):
     """Franka robot arm environment."""
 
     CONFIG_CLS: type[FrankaRobotConfig] = FrankaRobotConfig
+    JOINT_LIMIT_LOW = np.array(
+        [-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973],
+        dtype=np.float32,
+    )
+    JOINT_LIMIT_HIGH = np.array(
+        [2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973],
+        dtype=np.float32,
+    )
 
     def __init__(
         self,
@@ -147,6 +171,8 @@ class FrankaEnv(gym.Env):
 
         self._success_hold_counter = 0  # Initialize the success hold counter
         self._reward_worker = None
+        self.control_client = None
+        self._controller = None  # For backward compatibility
 
         if not self.config.is_dummy:
             self._setup_hardware()
@@ -162,18 +188,34 @@ class FrankaEnv(gym.Env):
         if self.config.is_dummy:
             return
 
-        # Wait for the robot to be ready
-        start_time = time.time()
-        while not self._controller.is_robot_up().wait()[0]:
-            time.sleep(0.5)
-            if time.time() - start_time > 30:
-                self._logger.warning(
-                    f"Waited {time.time() - start_time} seconds for Franka robot to be ready."
-                )
-
-        self._interpolate_move(self._reset_pose)
-        time.sleep(1.0)
-        self._franka_state = self._controller.get_state().wait()[0]
+        # Wait for robot to be ready (control_client specific)
+        if self.control_client is not None:
+            # control_client connects directly, no need to wait for separate ROS node
+            time.sleep(1.0)
+            # Get initial state
+            joint_state = self.control_client.get_joint_state()
+            gripper_state = self.control_client.get_gripper_state()
+            self._franka_state = FrankaRobotState()
+            self._franka_state.arm_joint_position = joint_state["q"]
+            self._franka_state.arm_joint_velocity = joint_state["dq"]
+            self._franka_state.tcp_pose = np.concatenate(
+                [joint_state["EE_pos"], joint_state["EE_quat"]], axis=0
+            )
+            self._franka_state.tcp_force = joint_state["O_F_ext_hat_K"][:3]
+            self._franka_state.tcp_torque = joint_state["O_F_ext_hat_K"][3:]
+            self._franka_state.gripper_position = float(gripper_state["position"])
+        elif self._controller is not None:
+            # ROS fallback path
+            start_time = time.time()
+            while not self._controller.is_robot_up().wait()[0]:
+                time.sleep(0.5)
+                if time.time() - start_time > 30:
+                    self._logger.warning(
+                        f"Waited {time.time() - start_time} seconds for Franka robot to be ready."
+                    )
+            self._interpolate_move(self._reset_pose)
+            time.sleep(1.0)
+            self._franka_state = self._controller.get_state().wait()[0]
 
         # Init cameras
         self._open_cameras()
@@ -185,8 +227,6 @@ class FrankaEnv(gym.Env):
         return self._task_description
 
     def _setup_hardware(self):
-        from .franka_controller import FrankaController
-
         assert self.env_idx >= 0, "env_idx must be set for FrankaEnv."
 
         # Setup Franka IP and camera serials
@@ -210,22 +250,40 @@ class FrankaEnv(gym.Env):
                 self.hardware_info.config, "gripper_connection", None
             )
 
-        # Place the controller on controller_node_rank if the arm lives on a
-        # different machine (e.g. cameras on GPU server, arm on NUC).
-        # Falls back to the env worker's own node when not specified.
-        controller_node_rank = getattr(
-            self.hardware_info.config, "controller_node_rank", None
-        )
-        if controller_node_rank is None:
-            controller_node_rank = self.node_rank
-        self._controller = FrankaController.launch_controller(
-            robot_ip=self.config.robot_ip,
-            env_idx=self.env_idx,
-            node_rank=controller_node_rank,
-            worker_rank=self.env_worker_rank,
-            gripper_type=self.config.gripper_type or "franka",
-            gripper_connection=self.config.gripper_connection,
-        )
+        # Support both control_client (new) and ROS (legacy) backends
+        use_control_client = getattr(self.config, "use_control_client", False)
+
+        if use_control_client:
+            # NEW: Use control_client for direct robot communication
+            try:
+                from .control_client_interface import FrankaControlClientInterface
+                self.control_client = FrankaControlClientInterface(self.config)
+                self.control_client.connect()
+                self._logger.info("[FrankaEnv] Connected via control_client")
+            except Exception as e:
+                self._logger.error(f"[FrankaEnv] Failed to connect control_client: {e}")
+                raise
+        else:
+            # LEGACY: Use ROS controller (fallback)
+            from .franka_controller import FrankaController
+
+            # Place the controller on controller_node_rank if the arm lives on a
+            # different machine (e.g. cameras on GPU server, arm on NUC).
+            # Falls back to the env worker's own node when not specified.
+            controller_node_rank = getattr(
+                self.hardware_info.config, "controller_node_rank", None
+            )
+            if controller_node_rank is None:
+                controller_node_rank = self.node_rank
+            self._controller = FrankaController.launch_controller(
+                robot_ip=self.config.robot_ip,
+                env_idx=self.env_idx,
+                node_rank=controller_node_rank,
+                worker_rank=self.env_worker_rank,
+                gripper_type=self.config.gripper_type or "franka",
+                gripper_connection=self.config.gripper_connection,
+            )
+            self._logger.info("[FrankaEnv] Connected via ROS controller (legacy)")
 
     def _setup_reward_worker(self):
         if not self.config.use_reward_model:
@@ -254,47 +312,90 @@ class FrankaEnv(gym.Env):
     def transform_action_ee_to_base(self, action):
         action[:6] = np.linalg.inv(self.adjoint_matrix) @ action[:6]
         return action
-
+    #execute action in env here
     def step(self, action: np.ndarray):
-        """Take a step in the environment.
+        """Take a step in the environment with action.
 
-        action (np.ndarray): The action to take, which is a 7D vector representing the desired end-effector position and orientation,
-        as well as the gripper action. The first 3 elements correspond to the delta in x, y, z position, the next 3 elements correspond to the delta in rx, ry, rz orientation (in euler angles), and the last element corresponds to the gripper action.
-        [x_delta, y_delta, z_delta, rx_delta, ry_delta, rz_delta, gripper_action]
+        Supports two action formats:
+        - JOINT CONTROL (8D): [q1, q2, q3, q4, q5, q6, q7, gripper]
+          where q_i are absolute joint angles (rad) and gripper is [0, 1]
+        - CARTESIAN CONTROL (7D): [x_delta, y_delta, z_delta, rx_delta, ry_delta, rz_delta, gripper_action]
+          where deltas are relative movements and gripper_action is [-1, 1]
         """
         start_time = time.time()
-
-        # if self.use_rel_frame:
-        #     action = self.transform_action_ee_to_base(action)
-
         action = np.clip(action, self.action_space.low, self.action_space.high)
-        xyz_delta = action[:3]
+        is_gripper_action_effective = True
 
-        self.next_position = self._franka_state.tcp_pose.copy()
-        self.next_position[:3] = (
-            self.next_position[:3] + xyz_delta * self.config.action_scale[0]
-        )
+        # JOINT-BASED CONTROL (new)
+        if self.config.action_type == "joint" and self.control_client is not None:
+            q_target = action[:7]        # Target joint angles (rad)
+            gripper_target = action[7]   # Target gripper position [0, 1]
 
-        if not self.config.is_dummy:
-            self.next_position[3:] = (
-                R.from_euler("xyz", action[3:6] * self.config.action_scale[1])
-                * R.from_quat(self._franka_state.tcp_pose[3:].copy())
-            ).as_quat()
+            # Get current joint state
+            current_state = self.control_client.get_joint_state()
+            q_current = current_state['q']  # [7]
 
-            gripper_action = action[6] * self.config.action_scale[2]
-            is_gripper_action_effective = self._gripper_action(gripper_action)
+            # Safety Check 1: Velocity limit (smoothness)
+            dq = q_target - q_current
+            max_dq = self.config.max_joint_update if hasattr(self.config, 'max_joint_update') else 0.2
+            dq_clipped = np.clip(dq, -max_dq, +max_dq)
+            q_intermediate = q_current + dq_clipped
 
-            clipped_position = self._clip_position_to_safety_box(self.next_position)
+            # Safety Check 2: Position limits (hardware safety)
+            q_commanded = np.clip(
+                q_intermediate,
+                self.JOINT_LIMIT_LOW,
+                self.JOINT_LIMIT_HIGH,
+            )
 
-            self._move_action(clipped_position)
+            # Send joint command via control_client
+            try:
+                self.control_client.send_joint_command(
+                    joint_positions=q_commanded,
+                    gripper_position=gripper_target
+                )
+            except Exception as e:
+                print(f"[ERROR] Failed to send joint command: {e}")
+                is_gripper_action_effective = False
+
+        # CARTESIAN-BASED CONTROL (legacy ROS)
         else:
-            is_gripper_action_effective = True
+            xyz_delta = action[:3]
+            self.next_position = self._franka_state.tcp_pose.copy()
+            self.next_position[:3] = (
+                self.next_position[:3] + xyz_delta * self.config.action_scale[0]
+            )
+
+            if not self.config.is_dummy:
+                self.next_position[3:] = (
+                    R.from_euler("xyz", action[3:6] * self.config.action_scale[1])
+                    * R.from_quat(self._franka_state.tcp_pose[3:].copy())
+                ).as_quat()
+
+                gripper_action = action[6] * self.config.action_scale[2]
+                is_gripper_action_effective = self._gripper_action(gripper_action)
+
+                clipped_position = self._clip_position_to_safety_box(self.next_position)
+                self._move_action(clipped_position)
+            else:
+                is_gripper_action_effective = True
 
         self._num_steps += 1
         step_time = time.time() - start_time
         time.sleep(max(0, (1.0 / self.config.step_frequency) - step_time))
 
-        if not self.config.is_dummy:
+        if not self.config.is_dummy and self.control_client is not None:
+            joint_state = self.control_client.get_joint_state()
+            gripper_state = self.control_client.get_gripper_state()
+            self._franka_state.arm_joint_position = joint_state["q"]
+            self._franka_state.arm_joint_velocity = joint_state["dq"]
+            self._franka_state.tcp_pose = np.concatenate(
+                [joint_state["EE_pos"], joint_state["EE_quat"]], axis=0
+            )
+            self._franka_state.tcp_force = joint_state["O_F_ext_hat_K"][:3]
+            self._franka_state.tcp_torque = joint_state["O_F_ext_hat_K"][3:]
+            self._franka_state.gripper_position = float(gripper_state["position"])
+        elif not self.config.is_dummy:
             self._franka_state = self._controller.get_state().wait()[0]
         else:
             self._franka_state = self._franka_state
@@ -346,6 +447,31 @@ class FrankaEnv(gym.Env):
                 self._success_hold_counter = 0
             if self.config.enable_gripper_penalty and is_gripper_action_effective:
                 reward -= self.config.gripper_penalty
+            return reward
+
+        if self.control_client is not None:
+            ee_pos = observation["state"].get("ee_pos")
+            if ee_pos is None:
+                return 0.0
+
+            target_delta = np.abs(ee_pos - self.config.target_ee_pose[:3])
+            is_in_target_zone = np.all(
+                target_delta <= self.config.reward_threshold[:3]
+            )
+
+            if is_in_target_zone:
+                self._success_hold_counter += 1
+                reward = 1.0
+            else:
+                self._success_hold_counter = 0
+                if self.config.use_dense_reward:
+                    reward = np.exp(-500 * np.sum(np.square(target_delta)))
+                else:
+                    reward = 0.0
+
+            if self.config.enable_gripper_penalty and is_gripper_action_effective:
+                reward -= self.config.gripper_penalty
+
             return reward
 
         if not self.config.is_dummy:
@@ -418,6 +544,11 @@ class FrankaEnv(gym.Env):
 
         self._success_hold_counter = 0  # Reset hold counter at the start of the episode
 
+        if self.control_client is not None:
+            self._num_steps = 0
+            observation = self._get_observation()
+            return observation, {}
+
         self._controller.reconfigure_compliance_params(
             self.config.compliance_param
         ).wait()
@@ -480,39 +611,71 @@ class FrankaEnv(gym.Env):
             high=self.config.ee_pose_limit_max[3:],
             dtype=np.float64,
         )
-        self.action_space = gym.spaces.Box(
-            np.ones((7,), dtype=np.float32) * -1,
-            np.ones((7,), dtype=np.float32),
-        )
+        # Action space: 8D for joint control [q1..q7, gripper] or 7D for Cartesian
+        if self.config.action_type == "joint":
+            self.action_space = gym.spaces.Box(
+                low=np.concatenate(
+                    [self.JOINT_LIMIT_LOW, np.array([0.0], dtype=np.float32)]
+                ),
+                high=np.concatenate(
+                    [self.JOINT_LIMIT_HIGH, np.array([1.0], dtype=np.float32)]
+                ),
+                dtype=np.float32,
+            )
+        else:
+            self.action_space = gym.spaces.Box(
+                np.ones((7,), dtype=np.float32) * -1,
+                np.ones((7,), dtype=np.float32),
+            )
 
-        obs_tcp_pose_dim = 7
+        frame_spaces = {
+            f"wrist_{k + 1}": gym.spaces.Box(
+                0, 255, shape=(128, 128, 3), dtype=np.uint8
+            )
+            for k in range(len(self.config.camera_serials))
+        }
+        if self.config.use_control_client:
+            state_space = gym.spaces.Dict(
+                {
+                    "joint_positions": gym.spaces.Box(
+                        self.JOINT_LIMIT_LOW, self.JOINT_LIMIT_HIGH, dtype=np.float32
+                    ),
+                    "gripper_position": gym.spaces.Box(
+                        0.0, 1.0, shape=(1,), dtype=np.float32
+                    ),
+                    "ee_pos": gym.spaces.Box(
+                        -np.inf, np.inf, shape=(3,), dtype=np.float32
+                    ),
+                    "ee_quat": gym.spaces.Box(
+                        -np.inf, np.inf, shape=(4,), dtype=np.float32
+                    ),
+                }
+            )
+        else:
+            obs_tcp_pose_dim = 7
+            state_space = gym.spaces.Dict(
+                {
+                    "tcp_pose": gym.spaces.Box(
+                        -np.inf, np.inf, shape=(obs_tcp_pose_dim,)
+                    ),
+                    "tcp_vel": gym.spaces.Box(-np.inf, np.inf, shape=(6,)),
+                    "gripper_position": gym.spaces.Box(-1, 1, shape=(1,)),
+                    "tcp_force": gym.spaces.Box(-np.inf, np.inf, shape=(3,)),
+                    "tcp_torque": gym.spaces.Box(-np.inf, np.inf, shape=(3,)),
+                }
+            )
         self.observation_space = gym.spaces.Dict(
             {
-                "state": gym.spaces.Dict(
-                    {
-                        "tcp_pose": gym.spaces.Box(
-                            -np.inf, np.inf, shape=(obs_tcp_pose_dim,)
-                        ),
-                        "tcp_vel": gym.spaces.Box(-np.inf, np.inf, shape=(6,)),
-                        "gripper_position": gym.spaces.Box(-1, 1, shape=(1,)),
-                        "tcp_force": gym.spaces.Box(-np.inf, np.inf, shape=(3,)),
-                        "tcp_torque": gym.spaces.Box(-np.inf, np.inf, shape=(3,)),
-                    }
-                ),
-                "frames": gym.spaces.Dict(
-                    {
-                        f"wrist_{k + 1}": gym.spaces.Box(
-                            0, 255, shape=(128, 128, 3), dtype=np.uint8
-                        )
-                        for k in range(len(self.config.camera_serials))
-                    }
-                ),
+                "state": state_space,
+                "frames": gym.spaces.Dict(frame_spaces),
             }
         )
         self._base_observation_space = copy.deepcopy(self.observation_space)
 
     def _open_cameras(self):
         self._cameras: list[BaseCamera] = []
+        if self.control_client is not None:
+            return
         if self.config.camera_serials is None:
             return
         camera_type = self.config.camera_type or "realsense"
@@ -550,33 +713,70 @@ class FrankaEnv(gym.Env):
         return cropped_frame, resized_frame
 
     def _get_camera_frames(self) -> dict[str, np.ndarray]:
-        """Get frames from all cameras."""
+        """Get frames from all cameras.
+        
+        Supports both control_client and ROS backends:
+        - control_client: Calls self.control_client.get_camera_images()
+        - ROS: Calls camera.get_frame() on each ROS camera
+        """
         frames = {}
         display_frames = {}
-        for camera in self._cameras:
+        
+        # Use control_client camera images if available
+        if self.control_client is not None:
             try:
-                frame = camera.get_frame()
-                reshape_size = self.observation_space["frames"][
-                    camera._camera_info.name
-                ].shape[:2][::-1]
-                cropped_frame, resized_frame = self._crop_frame(frame, reshape_size)
-                frames[camera._camera_info.name] = resized_frame[
-                    ..., ::-1
-                ]  # Convert RGB to BGR
-                display_frames[camera._camera_info.name] = (
-                    resized_frame  # Original RGB for display
-                )
-                display_frames[f"{camera._camera_info.name}_full"] = (
-                    cropped_frame  # Non-resized version
-                )
-            except queue.Empty:
-                self._logger.warning(
-                    f"Camera {camera._camera_info.name} is not producing frames. Wait 5 seconds and try again."
-                )
-                time.sleep(5)
-                camera.close()
-                self._open_cameras()
-                return self._get_camera_frames()
+                camera_images = self.control_client.get_camera_images()
+                for idx, camera_id in enumerate(self.config.camera_serials):
+                    raw_image = camera_images.get(camera_id)
+                    if raw_image is None:
+                        self._logger.warning(
+                            f"Failed to get image for control_client camera {camera_id}"
+                        )
+                        continue
+                    frame_key = f"wrist_{idx + 1}"
+                    # Get expected reshape size from observation space
+                    frame_space = self.observation_space["frames"].spaces.get(frame_key)
+                    if frame_space is None:
+                        self._logger.warning(
+                            f"Missing observation-space entry for frame key {frame_key}"
+                        )
+                        continue
+                    reshape_size = frame_space.shape[:2][::-1]
+                    cropped_frame, resized_frame = self._crop_frame(
+                        raw_image, reshape_size
+                    )
+                    frames[frame_key] = resized_frame[..., ::-1]  # Convert RGB to BGR
+                    display_frames[frame_key] = resized_frame  # Original RGB for display
+                    display_frames[f"{frame_key}_full"] = cropped_frame
+            except Exception as e:
+                self._logger.warning(f"Failed to get camera images from control_client: {e}")
+                raise
+        else:
+            # Use ROS cameras (legacy)
+            for camera in self._cameras:
+                try:
+                    frame = camera.get_frame()
+                    reshape_size = self.observation_space["frames"][
+                        camera._camera_info.name
+                    ].shape[:2][::-1]
+                    cropped_frame, resized_frame = self._crop_frame(frame, reshape_size)
+                    frames[camera._camera_info.name] = resized_frame[
+                        ..., ::-1
+                    ]  # Convert RGB to BGR
+                    display_frames[camera._camera_info.name] = (
+                        resized_frame  # Original RGB for display
+                    )
+                    display_frames[f"{camera._camera_info.name}_full"] = (
+                        cropped_frame  # Non-resized version
+                    )
+                except queue.Empty:
+                    self._logger.warning(
+                        f"Camera {camera._camera_info.name} is not producing frames. Wait 5 seconds and try again."
+                    )
+                    time.sleep(5)
+                    camera.close()
+                    self._open_cameras()
+                    return self._get_camera_frames()
 
         self.camera_player.put_frame(display_frames)
         return frames
@@ -650,19 +850,42 @@ class FrankaEnv(gym.Env):
             print(f"Executing dummy action towards {position=}.")
 
     def _get_observation(self) -> dict:
+        """Get observation from robot state and cameras.
+        
+        Returns joint-based observation when using control_client,
+        TCP-based observation when using ROS.
+        """
         if not self.config.is_dummy:
             frames = self._get_camera_frames()
-            state = {
-                "tcp_pose": self._franka_state.tcp_pose,
-                "tcp_vel": self._franka_state.tcp_vel,
-                "gripper_position": np.array(
-                    [
-                        self._franka_state.gripper_position,
-                    ]
-                ),
-                "tcp_force": self._franka_state.tcp_force,
-                "tcp_torque": self._franka_state.tcp_torque,
-            }
+            
+            # Support both control_client (joint) and ROS (TCP) backends
+            if self.control_client is not None:
+                # NEW: Joint-based observation from control_client (8D: joint_pos + gripper)
+                joint_state = self.control_client.get_joint_state()
+                gripper_state = self.control_client.get_gripper_state()
+                
+                state = {
+                    "joint_positions": joint_state['q'],              # [7] rad
+                    "gripper_position": np.array(
+                        [gripper_state['position']]
+                    ),                                              # [1] normalized
+                    "ee_pos": joint_state["EE_pos"],                # [3]
+                    "ee_quat": joint_state["EE_quat"],              # [4]
+                }
+            else:
+                # LEGACY: TCP-based observation from ROS
+                state = {
+                    "tcp_pose": self._franka_state.tcp_pose,
+                    "tcp_vel": self._franka_state.tcp_vel,
+                    "gripper_position": np.array(
+                        [
+                            self._franka_state.gripper_position,
+                        ]
+                    ),
+                    "tcp_force": self._franka_state.tcp_force,
+                    "tcp_torque": self._franka_state.tcp_torque,
+                }
+            
             observation = {
                 "state": state,
                 "frames": frames,
