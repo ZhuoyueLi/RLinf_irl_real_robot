@@ -29,12 +29,14 @@ runner:
   save_interval: 2000
 
 data:
-  train_data_paths: "/hkfs/work/workspace/scratch/ujvgv-lerobot_data/new_scarf_25hz_right_wrist_without_ft_rlinf_legacy"
+  train_data_paths: "/hkfs/work/workspace/scratch/ujvgv-lerobot_data"
 
 algorithm:
   adv_type: gae
 
 actor:
+  openpi_data:
+    repo_id: "new_scarf_25hz_right_wrist_without_ft_rlinf_legacy"
   group_name: "ActorGroup"
   training_backend: "fsdp"
   micro_batch_size: 4
@@ -47,11 +49,13 @@ actor:
     num_action_chunks: 8
     action_dim: 8
     add_value_head: False
+    
     openpi:
       config_name: "pi05_franka_joint"
       detach_critic_input: True
       num_images_in_input: 2
-
+    openpi_data:
+      repo_id: "new_scarf_25hz_right_wrist_without_ft_rlinf_legacy"
   optim:
     lr: 2.5e-5
     value_lr: 1.55e-4

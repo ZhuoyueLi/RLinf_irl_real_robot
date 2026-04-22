@@ -739,3 +739,19 @@ def test_cluster_env_configs_multi_node_group_and_hetero_placement():
         if ray.is_initialized():
             ray.shutdown()
         _reset_cluster_singleton()
+
+
+def test_cluster_resolve_ray_temp_dir_falls_back_to_writable_dir(monkeypatch, tmp_path):
+    fallback_cwd = tmp_path / "workspace"
+    fallback_cwd.mkdir()
+
+    monkeypatch.setenv("TMPDIR", "/proc/rlinf-nonwritable")
+    monkeypatch.delenv("RAY_TMPDIR", raising=False)
+    monkeypatch.delenv("TEMP", raising=False)
+    monkeypatch.delenv("TMP", raising=False)
+    monkeypatch.chdir(fallback_cwd)
+
+    resolved = Cluster._resolve_ray_temp_dir()
+
+    assert resolved == str((fallback_cwd / ".ray" / "tmp").resolve())
+    assert os.path.isdir(resolved)

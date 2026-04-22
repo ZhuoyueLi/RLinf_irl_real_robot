@@ -57,7 +57,6 @@ class FrankaJointInputs(transforms.DataTransformFn):
                 data["observation/state"]
             ).float()
 
-        state = transforms.pad_to_dim(data["observation/state"], self.action_dim)
         right_image = _parse_image(data["observation/right_image"])
         wrist_image = _parse_image(data["observation/wrist_image"])
 
@@ -81,7 +80,7 @@ class FrankaJointInputs(transforms.DataTransformFn):
             raise ValueError(f"Unsupported model type: {self.model_type}")
 
         inputs = {
-            "state": state,
+            "state": data["observation/state"],
             "image": dict(zip(names, images, strict=True)),
             "image_mask": dict(zip(names, image_masks, strict=True)),
         }
@@ -90,7 +89,7 @@ class FrankaJointInputs(transforms.DataTransformFn):
             assert len(data["actions"].shape) == 2 and data["actions"].shape[-1] == 8, (
                 f"Expected actions shape (N, 8), got {data['actions'].shape}"
             )
-            inputs["actions"] = transforms.pad_to_dim(data["actions"], self.action_dim)
+            inputs["actions"] = data["actions"]
 
         if "prompt" in data:
             if isinstance(data["prompt"], bytes):
@@ -98,3 +97,15 @@ class FrankaJointInputs(transforms.DataTransformFn):
             inputs["prompt"] = data["prompt"]
 
         return inputs
+
+
+@dataclasses.dataclass(frozen=True)
+class PadFrankaJointModelInputs(transforms.DataTransformFn):
+    action_dim: int
+
+    def __call__(self, data: dict) -> dict:
+        data = dict(data)
+        data["state"] = transforms.pad_to_dim(data["state"], self.action_dim)
+        if "actions" in data:
+            data["actions"] = transforms.pad_to_dim(data["actions"], self.action_dim)
+        return data

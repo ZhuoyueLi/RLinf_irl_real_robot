@@ -33,7 +33,7 @@ cluster:
             control_client_arm_name: FrankaPanda
             control_client_gripper_name: FrankaPandaGripper
             camera_type: control_client
-            camera_serials: ["depthai_camera"]
+            camera_serials: ["zed_wrist", "zed_right"] #camera names
             gripper_type: franka
 
 

@@ -17,6 +17,7 @@ import os
 import signal
 import sys
 import time
+from pathlib import Path
 from enum import Enum
 from importlib.metadata import version
 from typing import TYPE_CHECKING, Optional
@@ -202,6 +203,42 @@ class Cluster:
         handler.setFormatter(formatter)
         self._logger.addHandler(handler)
 
+    @staticmethod
+    def _is_writable_dir(path: str) -> bool:
+        """Check whether a directory exists or can be created and is writable."""
+        try:
+            Path(path).mkdir(parents=True, exist_ok=True)
+            return os.path.isdir(path) and os.access(path, os.W_OK | os.X_OK)
+        except OSError:
+            return False
+
+    @classmethod
+    def _resolve_ray_temp_dir(cls) -> Optional[str]:
+        """Choose a writable temp directory for Ray on restrictive cluster setups."""
+        candidates: list[Path] = []
+        for env_var in ("RAY_TMPDIR", "TMPDIR", "TEMP", "TMP"):
+            value = os.environ.get(env_var)
+            if value:
+                candidates.append(Path(value) / "ray")
+
+        cwd = Path.cwd()
+        candidates.extend(
+            [
+                cwd / ".ray" / "tmp",
+                Path("/tmp") / os.environ.get("USER", "ray") / "ray",
+            ]
+        )
+
+        seen: set[Path] = set()
+        for candidate in candidates:
+            candidate = candidate.resolve(strict=False)
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if cls._is_writable_dir(str(candidate)):
+                return str(candidate)
+        return None
+
     def _init_and_launch_managers(
         self,
         num_nodes: int,
@@ -244,19 +281,19 @@ class Cluster:
             self._cluster_cfg.num_nodes if self._cluster_cfg is not None else num_nodes
         )
         assert self._num_nodes >= 0, "num_nodes must be greater than or equal to 0."
+        ray_temp_dir = self._resolve_ray_temp_dir()
+        ray_init_kwargs = {
+            "logging_level": Cluster.LOGGING_LEVEL,
+            "namespace": Cluster.NAMESPACE,
+        }
+        if ray_temp_dir is not None:
+            os.environ.setdefault("RAY_TMPDIR", ray_temp_dir)
+            ray_init_kwargs["_temp_dir"] = ray_temp_dir
 
-        try:
-            # First try to connect to an existing Ray cluster
-            ray.init(
-                address="auto",
-                logging_level=Cluster.LOGGING_LEVEL,
-                namespace=Cluster.NAMESPACE,
-            )
-        except ConnectionError:
-            ray.init(
-                logging_level=Cluster.LOGGING_LEVEL,
-                namespace=Cluster.NAMESPACE,
-            )
+        # Start an isolated Ray instance for the current environment instead of
+        # auto-attaching to any pre-existing cluster on the node. This avoids
+        # version mismatches with other users' Ray/Python environments.
+        ray.init(**ray_init_kwargs)
 
         # Ray log collector
         if distributed_log_dir is not None:
@@ -364,11 +401,16 @@ class Cluster:
 
     def _init_from_existing_managers(self):
         if not ray.is_initialized():
-            ray.init(
-                address="auto",
-                namespace=Cluster.NAMESPACE,
-                logging_level=Cluster.LOGGING_LEVEL,
-            )
+            ray_init_kwargs = {
+                "address": "auto",
+                "namespace": Cluster.NAMESPACE,
+                "logging_level": Cluster.LOGGING_LEVEL,
+            }
+            ray_temp_dir = self._resolve_ray_temp_dir()
+            if ray_temp_dir is not None:
+                os.environ.setdefault("RAY_TMPDIR", ray_temp_dir)
+                ray_init_kwargs["_temp_dir"] = ray_temp_dir
+            ray.init(**ray_init_kwargs)
 
         from ..manager.node_manager import NodeManager
 

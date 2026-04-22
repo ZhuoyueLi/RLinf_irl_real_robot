@@ -14,6 +14,7 @@
 
 import math
 import random
+from contextlib import contextmanager
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -321,12 +322,35 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         else:
             raise NotImplementedError
 
+    @contextmanager
+    def _suspend_forced_gemma_gradient_checkpointing(self):
+        """Keep upstream OpenPI from re-enabling Gemma checkpointing during SFT."""
+        gemma_model = getattr(
+            getattr(self.paligemma_with_expert, "gemma_expert", None), "model", None
+        )
+        if gemma_model is None:
+            yield
+            return
+
+        had_attr = hasattr(gemma_model, "gradient_checkpointing")
+        original_value = getattr(gemma_model, "gradient_checkpointing", None)
+
+        if had_attr and not self.is_gradient_checkpointing_enabled():
+            delattr(gemma_model, "gradient_checkpointing")
+
+        try:
+            yield
+        finally:
+            if had_attr and not hasattr(gemma_model, "gradient_checkpointing"):
+                gemma_model.gradient_checkpointing = original_value
+
     def sft_forward(self, data, **kwargs):
         if hasattr(self, "gradient_checkpointing_disable"):
             self.gradient_checkpointing_disable()
         observation = data["observation"]
         actions = data["actions"]
-        return super().forward(observation, actions)
+        with self._suspend_forced_gemma_gradient_checkpointing():
+            return super().forward(observation, actions)
 
     def prepare_dagger_sft_batch(self, batch):
         """Prepare replay-buffer samples for DAgger SFT updates."""

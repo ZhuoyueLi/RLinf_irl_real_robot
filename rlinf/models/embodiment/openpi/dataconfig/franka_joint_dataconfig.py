@@ -34,12 +34,13 @@ class LeRobotFrankaJointDataConfig(DataConfigFactory):
     ) -> DataConfig:
         repack_transform = _transforms.Group(
             inputs=[
+                #new keys:old keys
                 _transforms.RepackTransform(
                     {
-                        "observation.images.right": "observation/right_image",
-                        "observation.images.wrist": "observation/wrist_image",
-                        "observation.state": "observation/state",
-                        "action": "actions",
+                        "observation/right_image": "observation.images.right",
+                        "observation/wrist_image": "observation.images.wrist",
+                        "observation/state": "observation.state",
+                        "actions": "action",
                     }
                 )
             ]
@@ -55,12 +56,23 @@ class LeRobotFrankaJointDataConfig(DataConfigFactory):
             outputs=[franka_joint_policy.FrankaJointOutputs(output_action_dim=8)],
         )
 
-        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(
+        base_model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(
             model_config
         )
+        model_transforms = _transforms.Group(
+            inputs=[
+                franka_joint_policy.PadFrankaJointModelInputs(
+                    action_dim=model_config.action_dim
+                ),
+                *base_model_transforms.inputs,
+            ],
+            outputs=base_model_transforms.outputs,
+        )
 
+        base_config = self.create_base_config(assets_dirs, model_config)
         return dataclasses.replace(
-            self.create_base_config(assets_dirs, model_config),
+            base_config,
+            action_sequence_keys=("action",),
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
